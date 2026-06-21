@@ -1,0 +1,249 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE nta PUBLIC '-//Uppaal Team//DTD Flat System 1.6//EN' 'http://www.it.uu.se/research/group/darts/uppaal/flat-1_6.dtd'>
+<nta>
+	<declaration>// Temperature lato caldo e freddo (gradi C, intere)
+int T_calda  = 25;
+int T_fredda = 25;
+
+// Stato sensore PT100
+bool pt100_ok = true;
+
+// Comandi operatore (sincroni)
+chan cmd_start, cmd_stop, cmd_reset;
+
+// Canale URGENTE per fault termico/sensore:
+// quando abilitato il tempo NON avanza -> THERMAL_FAULT immediato
+urgent chan overheat;
+
+// Clock per DEAD_BAND
+clock x;</declaration>
+
+	<!-- ===================================================
+	     TEMPLATE: Cella_Peltier
+	     Location IDs: cp0..cp4
+	     Transition IDs: ct0..ct9
+	     =================================================== -->
+	<template>
+		<name x="5" y="5">Cella_Peltier</name>
+		<declaration></declaration>
+
+		<!-- INIT: committed, esce senza far avanzare il tempo -->
+		<location id="cp0" x="76" y="-68">
+			<name x="59" y="-102">INIT</name>
+			<committed/>
+		</location>
+
+		<!-- STANDBY -->
+		<location id="cp1" x="-17" y="17">
+			<name x="0" y="8">STANDBY</name>
+		</location>
+
+		<!-- ACTIVE_CONTROL: fault gestito da urgent channel, nessun invariante su T_calda -->
+		<location id="cp2" x="-17" y="144">
+			<name x="-153" y="119">ACTIVE_CONTROL</name>
+		</location>
+
+		<!-- DEAD_BAND: pausa di misura -->
+		<location id="cp3" x="-17" y="263">
+			<name x="0" y="255">DEAD_BAND</name>
+			<label kind="invariant" x="-42" y="280">x &lt;= 1</label>
+		</location>
+
+		<!-- THERMAL_FAULT -->
+		<location id="cp4" x="170" y="85">
+			<name x="187" y="76">THERMAL_FAULT</name>
+		</location>
+
+		<init ref="cp0"/>
+
+		<!-- INIT -> STANDBY: sensore OK -->
+		<transition id="ct0">
+			<source ref="cp0"/>
+			<target ref="cp1"/>
+			<label kind="guard" x="-161" y="-68">pt100_ok == true</label>
+			<nail x="-17" y="-68"/>
+		</transition>
+
+		<!-- INIT -> THERMAL_FAULT: guasto PT100 al boot -->
+		<transition id="ct1">
+			<source ref="cp0"/>
+			<target ref="cp4"/>
+			<label kind="guard" x="110" y="-68">pt100_ok == false</label>
+			<nail x="170" y="-68"/>
+		</transition>
+
+		<!-- STANDBY -> ACTIVE_CONTROL: avvio, temperatura sicura -->
+		<transition id="ct2">
+			<source ref="cp1"/>
+			<target ref="cp2"/>
+			<label kind="synchronisation" x="8" y="59">cmd_start?</label>
+			<label kind="guard"           x="8" y="76">T_calda &lt;= 60</label>
+			<nail x="0" y="85"/>
+		</transition>
+
+		<!-- STANDBY -> THERMAL_FAULT: fault rilevato in attesa -->
+		<transition id="ct3">
+			<source ref="cp1"/>
+			<target ref="cp4"/>
+			<label kind="guard" x="100" y="42">T_calda &gt; 60 || pt100_ok == false</label>
+			<nail x="170" y="17"/>
+		</transition>
+
+		<!-- ACTIVE_CONTROL -> THERMAL_FAULT via urgent channel overheat -->
+		<transition id="ct4">
+			<source ref="cp2"/>
+			<target ref="cp4"/>
+			<label kind="synchronisation" x="100" y="127">overheat?</label>
+			<nail x="170" y="144"/>
+		</transition>
+
+		<!-- ACTIVE_CONTROL -> DEAD_BAND: ciclo normale (solo se T sicura) -->
+		<transition id="ct5">
+			<source ref="cp2"/>
+			<target ref="cp3"/>
+			<label kind="guard"      x="8" y="187">T_calda &lt;= 60</label>
+			<label kind="assignment" x="8" y="204">x = 0</label>
+			<nail x="0" y="204"/>
+		</transition>
+
+		<!-- ACTIVE_CONTROL -> STANDBY: stop volontario (solo se T sicura) -->
+		<transition id="ct6">
+			<source ref="cp2"/>
+			<target ref="cp1"/>
+			<label kind="synchronisation" x="-200" y="59">cmd_stop?</label>
+			<label kind="guard"           x="-200" y="76">T_calda &lt;= 60</label>
+			<nail x="-110" y="85"/>
+		</transition>
+
+		<!-- DEAD_BAND -> ACTIVE_CONTROL: fine pausa -->
+		<transition id="ct7">
+			<source ref="cp3"/>
+			<target ref="cp2"/>
+			<label kind="guard" x="-130" y="187">x &gt;= 1</label>
+			<nail x="-80" y="204"/>
+		</transition>
+
+		<!-- DEAD_BAND -> THERMAL_FAULT via urgent channel overheat -->
+		<transition id="ct8">
+			<source ref="cp3"/>
+			<target ref="cp4"/>
+			<label kind="synchronisation" x="100" y="240">overheat?</label>
+			<nail x="170" y="263"/>
+		</transition>
+
+		<!-- THERMAL_FAULT -> INIT: reset -->
+		<transition id="ct9">
+			<source ref="cp4"/>
+			<target ref="cp0"/>
+			<label kind="synchronisation" x="76" y="25">cmd_reset?</label>
+			<nail x="76" y="51"/>
+		</transition>
+
+	</template>
+
+	<!-- ===================================================
+	     TEMPLATE: Pulsantiera  (ambiente / operatore)
+	     Location IDs: pl0
+	     Transition IDs: pt0..pt5
+
+	     GUARDIE sulle iniezioni di fault:
+	       T_calda = 65    solo se T_calda != 65  (impedisce loop no-op)
+	       pt100_ok = false solo se pt100_ok == true (impedisce loop no-op)
+	     Senza queste guardie UPPAAL trova un livelock: la Pulsantiera
+	     cicla su una tau-transizione idempotente bloccando l'urgent
+	     channel overheat che non riesce mai a sincronizzarsi.
+	     =================================================== -->
+	<template>
+		<name>Pulsantiera</name>
+		<location id="pl0" x="0" y="0">
+			<name x="-42" y="-34">Idle</name>
+		</location>
+		<init ref="pl0"/>
+
+		<!-- cmd_start -->
+		<transition id="pt0">
+			<source ref="pl0"/>
+			<target ref="pl0"/>
+			<label kind="synchronisation" x="-153" y="-8">cmd_start!</label>
+			<nail x="-68" y="17"/>
+			<nail x="-68" y="-17"/>
+		</transition>
+
+		<!-- cmd_stop -->
+		<transition id="pt1">
+			<source ref="pl0"/>
+			<target ref="pl0"/>
+			<label kind="synchronisation" x="76" y="-8">cmd_stop!</label>
+			<nail x="68" y="17"/>
+			<nail x="68" y="-17"/>
+		</transition>
+
+		<!-- cmd_reset -->
+		<transition id="pt2">
+			<source ref="pl0"/>
+			<target ref="pl0"/>
+			<label kind="synchronisation" x="-34" y="76">cmd_reset!</label>
+			<nail x="-17" y="76"/>
+			<nail x="17" y="76"/>
+		</transition>
+
+		<!-- Iniezione fault termico: T_calda sale a 65
+		     GUARDIA: solo se T_calda e' ancora sotto soglia (impedisce loop no-op) -->
+		<transition id="pt3">
+			<source ref="pl0"/>
+			<target ref="pl0"/>
+			<label kind="guard"      x="-260" y="-25">T_calda != 65</label>
+			<label kind="assignment" x="-260" y="-8">T_calda = 65</label>
+			<nail x="-160" y="17"/>
+			<nail x="-160" y="-17"/>
+		</transition>
+
+		<!-- Iniezione fault sensore: PT100 guasto
+		     GUARDIA: solo se il sensore e' ancora OK (impedisce loop no-op) -->
+		<transition id="pt4">
+			<source ref="pl0"/>
+			<target ref="pl0"/>
+			<label kind="guard"      x="100" y="-25">pt100_ok == true</label>
+			<label kind="assignment" x="100" y="-8">pt100_ok = false</label>
+			<nail x="160" y="17"/>
+			<nail x="160" y="-17"/>
+		</transition>
+
+		<!-- Segnale overheat URGENTE
+		     Il tempo non puo' avanzare mentre questo canale e' abilitato -->
+		<transition id="pt5">
+			<source ref="pl0"/>
+			<target ref="pl0"/>
+			<label kind="guard"           x="-34" y="110">T_calda &gt; 60 || pt100_ok == false</label>
+			<label kind="synchronisation" x="-34" y="127">overheat!</label>
+			<nail x="-17" y="110"/>
+			<nail x="17"  y="127"/>
+		</transition>
+
+	</template>
+
+	<system>
+Process_1 = Cella_Peltier();
+Process_2 = Pulsantiera();
+system Process_1, Process_2;
+</system>
+
+	<queries>
+		<query>
+			<formula>A[] not deadlock</formula>
+			<comment>Il sistema ha sempre almeno una transizione abilitata</comment>
+		</query>
+		<query>
+			<formula>E&lt;&gt; Process_1.THERMAL_FAULT</formula>
+			<comment>THERMAL_FAULT e' raggiungibile (non vacuo)</comment>
+		</query>
+		<query>
+			<formula>(Process_1.ACTIVE_CONTROL and T_calda &gt; 60) --&gt; Process_1.THERMAL_FAULT</formula>
+			<comment>Sovratemperatura in ACTIVE_CONTROL implica THERMAL_FAULT (urgent channel)</comment>
+		</query>
+		<query>
+			<formula>(Process_1.INIT and pt100_ok == false) --&gt; Process_1.THERMAL_FAULT</formula>
+			<comment>Guasto PT100 in INIT causa THERMAL_FAULT immediato (INIT committed)</comment>
+		</query>
+	</queries>
+</nta>
