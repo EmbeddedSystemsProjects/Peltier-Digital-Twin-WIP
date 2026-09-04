@@ -81,8 +81,10 @@ bool getSequenzaTest(unsigned long t_ms, double &sp_out) {
 // ==========================================
 // 4. VARIABILI DI SISTEMA
 // ==========================================
-enum State { INIT, STANDBY, ACTIVE_CONTROL, THERMAL_FAULT };
+enum State { INIT, STANDBY, DEAD_BAND, ACTIVE_CONTROL, THERMAL_FAULT };
 State currentState = INIT;
+
+unsigned long dead_band_start_ms = 0;
 
 float T_calda;
 float T_fredda;
@@ -185,7 +187,23 @@ void loop() {
         duty_us = 0;
         if (attivo && T_calda <= 60.0) {
           Setpoint_PID = sp_corrente;
-          // Reset integrale PID prima di ogni nuova fase attiva
+          dead_band_start_ms = tempo_attuale;
+          currentState = DEAD_BAND;
+        }
+        break;
+      }
+
+      case DEAD_BAND: {
+        duty_us = 0;
+        if (T_calda > 60.0) {
+          currentState = THERMAL_FAULT;
+          break;
+        }
+        if (!attivo) {
+          currentState = STANDBY;
+          break;
+        }
+        if (tempo_attuale - dead_band_start_ms >= 1000UL) {
           mioPID.SetMode(MANUAL);
           Output_PID = 0.0;
           mioPID.SetMode(AUTOMATIC);
@@ -229,6 +247,7 @@ void loop() {
       case INIT:           stato_str = "INIT";           break;
       case STANDBY:        stato_str = "STANDBY";        break;
       case ACTIVE_CONTROL: stato_str = "ACTIVE_CONTROL"; break;
+      case DEAD_BAND:      stato_str = "DEAD_BAND";      break;
       case THERMAL_FAULT:  stato_str = "THERMAL_FAULT";  break;
       default:             stato_str = "UNKNOWN";        break;
     }
